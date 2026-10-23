@@ -66,3 +66,14 @@ camera:
 5. Verify the ball inside the mug in both views; at some camera angles the mug wall
    hides it. Return with `so101.go_to(joints_deg=[-5, -106.3, 66.7, 97.2, -84.8])`;
    `shoulder_lift` must stay above its limit of about −107°.
+
+## Fast skill (in progress)
+
+[`skill.py`](skill.py) runs the whole task as one CAP program: SAM3 locates the ball and
+the mug once in the external view, two-point pixel-to-millimetre pairs per height map them
+to the base frame, and the grasp and placement above run as continuous moves at 60°/s.
+Its first trial reached the grasp in 17 s (10.4 s of it SAM3) but closed without contact:
+the ball sat deep between the jaws near the palm, the failure mode described above, so
+the open-loop estimate was off by roughly 1 cm. Before relying on it, add a wrist-camera
+check before closing (successful closes had the ball near wrist pixel (435, 312) with a
+radius of 50–68 px) and replace the two-point maps with a calibration from more points.

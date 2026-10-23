@@ -109,6 +109,7 @@ def main():
     parser.add_argument("--record", action="store_true", help="write OUTPUT/session-<time>.mp4 at 10 fps")
     parser.add_argument("--sam3-url", help="SAM3 service, e.g. http://127.0.0.1:8114")
     parser.add_argument("--mcp-port", type=int, default=8222)
+    parser.add_argument("--speed", type=float, default=20.0, help="arm joint speed, degrees per second")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--program", type=Path)
     mode.add_argument("--stdio", action="store_true")
@@ -126,6 +127,7 @@ def main():
 
             segmentation = Sam3Provider(base_url=args.sam3_url)
         adapter = So101Adapter(hardware, allow_motion=args.allow_motion, segmentation_provider=segmentation,
+                              speed_deg_s=args.speed,
                               event_sink=lambda e: log.write(json.dumps(e, allow_nan=False) + "\n"))
         try:
             if args.record:

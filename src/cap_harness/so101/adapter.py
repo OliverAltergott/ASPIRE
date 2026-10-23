@@ -37,6 +37,8 @@ PUBLIC_EXTENSIONS = frozenset({
 IK_SEEDS_DEG = ((0, -73, 85, 26), (0, -20, 75, -17), (0, 0, 40, 0), (0, -40, 20, 70))
 # Loaded shoulder/elbow joints settle up to ~1.7 degrees below their goals under gravity.
 SETTLE_TOLERANCE_DEG = 2.5
+TICK_HZ = 50  # A full bus read takes ~11 ms; goals stream at this rate.
+SETTLE_TICKS = 30  # At most 0.6 s waiting for the arm to arrive after a path.
 MAX_TOOL_TRAVEL_MM = 200.0
 
 
@@ -52,9 +54,11 @@ class So101Adapter:
     arms = ("primary",)
 
     def __init__(self, hardware, *, allow_motion=False, sleep=time.sleep, event_sink=None,
-                 table_floor_mm=-8.0, segmentation_provider=None):
+                 table_floor_mm=-8.0, segmentation_provider=None, speed_deg_s=20.0, gripper_speed=50.0):
         self.hardware = hardware
         self.allow_motion = allow_motion
+        self.speed_deg_s = speed_deg_s
+        self.gripper_speed = gripper_speed
         self.segmentation_provider = segmentation_provider
         self.table_floor_mm = table_floor_mm
         self._sleep = sleep
@@ -174,50 +178,82 @@ class So101Adapter:
             except Exception as exc:
                 return self._failure(exc)
 
-    def _move(self, changes):
+    def _gripper_path(self, target):
+        """Gripper waypoints from the current goal to target, at most 10 units apart."""
+        count = max(1, math.ceil(abs(target - self._goals["gripper"]) / 10))
+        return [{"gripper": self._goals["gripper"] + (target - self._goals["gripper"]) * i / count}
+                for i in range(1, count + 1)]
+
+    def _move(self, path):
+        """Stream goals through waypoints (dicts of motor targets) in one continuous motion.
+
+        Every waypoint is checked before the first write: calibrated limits, at most 5 degrees
+        (gripper 10 units) from the previous waypoint, and the first within 5 degrees of the
+        measured arm. Each tick re-checks torque and arm tracking; the arm settles once.
+        """
+        path = [path] if isinstance(path, Mapping) else list(path)
         steps = 0
         try:
             before = self._check()
-            if not changes or any(j not in MOTORS for j in changes):
+            if not path or any(not changes or any(j not in MOTORS for j in changes) for changes in path):
                 raise ValueError("Expected named SO101 joint targets")
-            for joint, target in changes.items():
-                lower, upper = before["limits"][joint]
-                bound = 10 if joint == "gripper" else 5
-                if not math.isfinite(target) or not lower <= target <= upper:
-                    raise ValueError(f"{joint}: target outside calibrated limits")
-                if abs(target - self._goals[joint]) > bound + 1e-8:
-                    raise ValueError(f"{joint}: requested move exceeds {bound} units")
+            previous = dict(self._goals)
+            for changes in path:
+                for joint, target in changes.items():
+                    lower, upper = before["limits"][joint]
+                    bound = 10 if joint == "gripper" else 5
+                    if not math.isfinite(target) or not lower <= target <= upper:
+                        raise ValueError(f"{joint}: target outside calibrated limits")
+                    if abs(target - previous[joint]) > bound + 1e-8:
+                        raise ValueError(f"{joint}: requested move exceeds {bound} units")
+                previous.update(changes)
+            for joint, target in path[0].items():
                 if joint != "gripper" and abs(target - before["positions"][joint]) > 5:
                     raise ValueError(f"{joint}: target exceeds measured-position tracking bound")
-            start = {j: self._goals[j] for j in changes}
-            duration = max(abs(changes[j] - start[j]) / (10 if j == "gripper" else 3) for j in changes)
-            count = max(1, math.ceil(duration * 20))
+            # Servo lag grows with speed; settling below still demands SETTLE_TOLERANCE_DEG.
+            track_bound = 5 + 0.1 * self.speed_deg_s
             # Consume evidence even if a subsequent command or capture fails.
             self._last_observation = None
-            for i in range(1, count + 1):
-                current = self.hardware.read()
-                if any(current["torque"][j] != 1 for j in MOTORS):
-                    raise ValueError("Torque was disabled during motion")
-                if any(abs(current["positions"][j] - self._goals[j]) > 5 for j in JOINTS):
-                    raise ValueError("Tracking error during motion; stopped future commands")
-                goals = {j: start[j] + (changes[j] - start[j]) * i / count for j in changes}
-                self._record(operation="command", goals_degrees_percent=goals)
-                self.hardware.write(goals)
-                self._goals.update(goals)
-                self._commands += 1
-                steps += 1
-                self._sleep(max(duration / count, 0.01))
-            self._sleep(0.4)
+            peak = 0.0
+            for changes in path:
+                start = {j: self._goals[j] for j in changes}
+                duration = max(abs(changes[j] - start[j]) / (self.gripper_speed if j == "gripper" else self.speed_deg_s)
+                               for j in changes)
+                count = max(1, math.ceil(duration * TICK_HZ))
+                for i in range(1, count + 1):
+                    tick = time.perf_counter()
+                    current = self.hardware.read()
+                    if any(current["torque"][j] != 1 for j in MOTORS):
+                        raise ValueError("Torque was disabled during motion")
+                    lag = max(abs(current["positions"][j] - self._goals[j]) for j in JOINTS)
+                    if lag > track_bound:
+                        raise ValueError("Tracking error during motion; stopped future commands")
+                    peak = max(peak, lag)
+                    goals = {j: start[j] + (changes[j] - start[j]) * i / count for j in changes}
+                    self._record(operation="command", goals_degrees_percent=goals)
+                    self.hardware.write(goals)
+                    self._goals.update(goals)
+                    self._commands += 1
+                    steps += 1
+                    self._sleep(max(0.0, duration / count - (time.perf_counter() - tick)))
+            targets = {joint: value for changes in path for joint, value in changes.items()}
+            for _ in range(SETTLE_TICKS):
+                after = self.hardware.read()
+                errors = {j: abs(after["positions"][j] - targets[j]) for j in targets}
+                if all(error <= (2 if j == "gripper" else 0.5 * SETTLE_TOLERANCE_DEG) for j, error in errors.items()):
+                    break
+                self._sleep(1 / TICK_HZ)
             observation = self.get_observation()
             after = self.hardware.read()
-            errors = {j: abs(after["positions"][j] - changes[j]) for j in changes}
+            errors = {j: abs(after["positions"][j] - targets[j]) for j in targets}
             ok = all(error <= (2 if j == "gripper" else SETTLE_TOLERANCE_DEG) for j, error in errors.items())
             self._record(operation="terminal", telemetry=after, target_errors=errors)
             return ExecutionResult(
                 ok=ok, steps_executed=steps, final_observation=observation,
                 error=None if ok else ApiError(ErrorCode.CONTROLLER_FAILED,
                     "Target not reached; inspect contact before continuing. Gripper stall alone is not a grasp."),
-                diagnostics={"target_errors_degrees_percent": errors, "commands_sent": self._commands},
+                diagnostics={"target_errors_degrees_percent": errors, "commands_sent": self._commands,
+                             "peak_tracking_error_deg": round(peak, 2)},
             )
         except Exception as exc:
             self._record(operation="failure", message=str(exc), steps_executed=steps)
@@ -245,15 +281,9 @@ class So101Adapter:
         with self._lock:
             if arm != "primary" or not math.isfinite(position) or not 0 <= position <= 1:
                 return self._failure(ValueError("Expected primary arm and gripper in [0, 1]"))
-            target = position * 100
             if self._goals is None:
-                return self._move({"gripper": target})  # Refused by the enable interlock.
-            while True:
-                remaining = target - self._goals["gripper"]
-                step = target if abs(remaining) <= 10 else self._goals["gripper"] + math.copysign(10, remaining)
-                result = self._move({"gripper": step})
-                if not result.ok or step == target:
-                    return result
+                return self._move({"gripper": position * 100})  # Refused by the enable interlock.
+            return self._move(self._gripper_path(position * 100))
 
     def move_tool(self, delta_mm, pitch=None):
         """Move the jaw-tip tool point along a straight so101_base line by (dx, dy, dz) mm.
@@ -278,12 +308,8 @@ class So101Adapter:
                                            floor_z_mm=self.table_floor_mm)
             except Exception as exc:
                 return self._failure(exc)
-            steps = 0
-            for waypoint in waypoints:
-                result = self._move(dict(zip(JOINTS, waypoint, strict=True)))
-                steps += result.steps_executed
-                if not result.ok:
-                    break
+            result = self._move([dict(zip(JOINTS, waypoint, strict=True)) for waypoint in waypoints])
+            steps = result.steps_executed
             diagnostics = {**result.diagnostics, "waypoints": len(waypoints),
                            "target_tool_xyz_mm": (tool_xyz_mm(start) + delta).round(1).tolist()}
             if result.final_observation is not None:
@@ -322,12 +348,8 @@ class So101Adapter:
                 waypoints = plan_joint_path(start, target, floor_z_mm=self.table_floor_mm)
             except Exception as exc:
                 return self._failure(exc)
-            steps = 0
-            for waypoint in waypoints:
-                result = self._move(dict(zip(JOINTS, waypoint, strict=True)))
-                steps += result.steps_executed
-                if not result.ok:
-                    break
+            result = self._move([dict(zip(JOINTS, waypoint, strict=True)) for waypoint in waypoints])
+            steps = result.steps_executed
             return ExecutionResult(ok=result.ok, steps_executed=steps, final_observation=result.final_observation,
                                    error=result.error, diagnostics={**result.diagnostics, "waypoints": len(waypoints),
                                    "target_joints_deg": np.round(target, 1).tolist(),
@@ -346,27 +368,27 @@ class So101Adapter:
                 return self._failure(ValueError("Enable the arm first"))
             if not (math.isfinite(min_opening) and 0 <= min_opening <= 1 and math.isfinite(ease) and 0 <= ease <= 0.1):
                 return self._failure(ValueError("Expected min_opening in [0, 1] and ease in [0, 0.1]"))
-            target, steps = min_opening * 100, 0
-            while (goal := max(target, self._goals["gripper"] - 10)) < self._goals["gripper"]:
-                result = self._move({"gripper": goal})
-                steps += result.steps_executed
-                if result.ok:
-                    continue
-                opening = self.hardware.read()["positions"]["gripper"]
-                if result.error.code != ErrorCode.CONTROLLER_FAILED or opening <= goal + 2:
-                    return result
-                hold = max(goal, opening - ease * 100)
-                final = self._move({"gripper": hold}) if hold > goal else result
+            target = min_opening * 100
+            if target >= self._goals["gripper"]:
+                return self._failure(ValueError("Gripper is already closed beyond min_opening"))
+            result = self._move(self._gripper_path(target))
+            if result.ok:
                 return ExecutionResult(
-                    ok=True, steps_executed=steps + final.steps_executed, final_observation=final.final_observation,
-                    diagnostics={"contact": True, "opening": opening / 100, "held_goal": hold / 100,
-                                 "gripper_load": self.hardware.read()["loads"]["gripper"],
-                                 "note": "Contact alone is not a grasp; lift and verify the object follows."},
+                    ok=False, steps_executed=result.steps_executed, final_observation=result.final_observation,
+                    error=ApiError(ErrorCode.CONTROLLER_FAILED, f"Closed to {min_opening:.2f} without contact"),
+                    diagnostics={"contact": False, "opening": self.hardware.read()["positions"]["gripper"] / 100},
                 )
+            opening = self.hardware.read()["positions"]["gripper"]
+            if result.error.code != ErrorCode.CONTROLLER_FAILED or opening <= target + 2:
+                return result
+            hold = max(target, opening - ease * 100)
+            final = self._move(self._gripper_path(hold)) if hold > target else result
             return ExecutionResult(
-                ok=False, steps_executed=steps, final_observation=self._last_observation,
-                error=ApiError(ErrorCode.CONTROLLER_FAILED, f"Closed to {target / 100:.2f} without contact"),
-                diagnostics={"contact": False, "opening": self.hardware.read()["positions"]["gripper"] / 100},
+                ok=True, steps_executed=result.steps_executed + final.steps_executed,
+                final_observation=final.final_observation,
+                diagnostics={"contact": True, "opening": opening / 100, "held_goal": hold / 100,
+                             "gripper_load": self.hardware.read()["loads"]["gripper"],
+                             "note": "Contact alone is not a grasp; lift and verify the object follows."},
             )
 
     def detect_color(self, hsv_lower, hsv_upper, camera_names=None, min_radius_px: float = 4.0,
