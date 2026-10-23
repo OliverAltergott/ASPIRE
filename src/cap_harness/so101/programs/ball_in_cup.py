@@ -2,8 +2,8 @@
 
 See examples/so101/ball_in_cup/TASK_CONTEXT.md. Needs the SO101 runtime with --sam3-url;
 run it with --program this file, or over MCP as cap_program_ball_in_cup. SAM3 locates the ball and the
-mug once in the external view; the recipe's grasp (38 degree pitch, tool 14 mm past the
-ball centre at z = 0) and placement (released at rim height) run as continuous moves.
+mug once in the external view; the recipe's grasp (38 degree pitch, tool GRASP_PAST_MM past
+the ball centre at z = 0) and placement (released at rim height) run as continuous moves.
 Before closing, the wrist view must show the ball where successful closes had it; the
 program corrects up to twice and otherwise stops without closing.
 
@@ -25,10 +25,15 @@ SIN, COS = math.sin(math.radians(PITCH)), math.cos(math.radians(PITCH))
 TABLE = ((370, 228, 219, 101), (386, 292, 276, 7))
 RELEASES = (((346, 354), (237.0, -85.6)), ((384, 146), (249.3, 201.8)), ((382.5, 142), (236.5, 198.5)))
 PLACE_Z = 102.0
-# Wrist view (640x480) of the ball just before the two successful closes: centres
+# At 38 degrees the jaws' lower edge rises about 0.8 mm per mm behind the tips. With the
+# ball centre 14 mm behind them, the closing jaw pushed the ball deeper and it rolled out
+# under the jaws in two of four closes; 8 mm keeps the edge about 10 mm below its equator.
+GRASP_PAST_MM = 8.0
+# Wrist view (640x480) of the ball just before successful closes at 14 mm: centres
 # (439, 307) and (417, 303), about 100 px across, so about 2.5 px/mm sideways; moving
-# along the fingers shifted the ball about 2.7 px/mm vertically.
-WRIST_TARGET, WRIST_TOLERANCE_PX = (428, 305), 12
+# along the fingers shifted the ball about 2.7 px/mm vertically. 6 mm shallower moves
+# it about 13 px up the image.
+WRIST_TARGET, WRIST_TOLERANCE_PX = (428, 292), 12
 LATERAL_PX_PER_MM, ALONG_PX_PER_MM = 2.5, 2.7
 
 
@@ -93,12 +98,16 @@ def stage_behind(grasp):
     raise ValueError("No reachable staging pose behind the ball; it is too close to the base")
 
 
+wrist_log = []
+
+
 def centre_ball_between_jaws():
     corrections = []
     for attempt in range(3):
         seen = so101.segment_text("green ball", "wrist")["wrist"]
         if not seen:
             raise ValueError("The ball is not visible between the jaws; not closing")
+        wrist_log.append({"center_px": seen[0]["center_px"], "box_xyxy": seen[0]["box_xyxy"]})
         dx = seen[0]["center_px"][0] - WRIST_TARGET[0]
         dy = seen[0]["center_px"][1] - WRIST_TARGET[1]
         if abs(dx) <= WRIST_TOLERANCE_PX and abs(dy) <= WRIST_TOLERANCE_PX:
@@ -127,12 +136,14 @@ if not ball_seen or not mug_seen:
     raise ValueError(f"SAM3 did not find both objects: ball={ball_seen}, mug={mug_seen}")
 ball = two_point(TABLE, ball_seen[0]["center_px"])
 
-grasp = tool_for(ball, 0.0)
+grasp = tool_for(ball, 0.0, GRASP_PAST_MM)
 standoff = stage_behind(grasp)
 check("open", set_gripper(0.55))
 check("approach", move_to(grasp))
 corrections = centre_ball_between_jaws()
-contact = check("grasp", so101.close_until_contact(0.1))
+contact = so101.close_until_contact(0.1)
+if not contact.ok:
+    raise ValueError(f"grasp failed: {contact.error}; wrist checks {wrist_log}")
 check("lift", so101.move_tool([0, 0, 70]))
 if so101.get_telemetry()["positions"]["gripper"] < 19:
     raise ValueError("The gripper closed further after lifting: the ball was not retained")
@@ -152,7 +163,7 @@ ball_after, mug_after = after["green ball"]["external"], after["mug"]["external"
 x0, y0, x1, y1 = mug_after[0]["box_xyxy"]
 inside = bool(ball_after) and x0 <= ball_after[0]["center_px"][0] <= x1 and y0 <= ball_after[0]["center_px"][1] <= y1
 result = {"standoff_mm": standoff, "ball_mm": [round(v) for v in ball], "place_tool_mm": [round(v) for v in place],
-          "wrist_corrections_mm": corrections, "contact_opening": contact.diagnostics["opening"],
+          "wrist_corrections_mm": corrections, "wrist_checks": wrist_log, "contact_opening": contact.diagnostics["opening"],
           "ball_in_mug_box": inside, "ball_seen_after_px": ball_after[0]["center_px"] if ball_after else None,
           "release": [mug_seen[0]["center_px"], [round(v, 1) for v in place_xy]]}
 print(result)

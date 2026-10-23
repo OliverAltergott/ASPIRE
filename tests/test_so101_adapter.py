@@ -355,7 +355,7 @@ class SceneSegmentation:
     wrist views report the given ball centres, repeating the last.
     """
 
-    def __init__(self, wrist_balls=((428, 305),)):
+    def __init__(self, wrist_balls=((428, 292),)):
         self.centres = {("external", "green ball"): (385, 290), ("external", "mug"): (382, 142)}
         self.wrist_balls = list(wrist_balls)
         self.hardware = None
@@ -380,7 +380,7 @@ class SceneSegmentation:
             box_xyxy=np.array([u - 30.0, v - 30.0, u + 30.0, v + 30.0]))])
 
 
-def run_skill(wrist_balls=((428, 305),), segmentation=None):
+def run_skill(wrist_balls=((428, 292),), segmentation=None):
     from pathlib import Path
 
     hw = SceneHardware()
@@ -405,7 +405,7 @@ def test_ball_in_cup_skill_runs_end_to_end_with_fallback_maps():
 
 
 def test_ball_in_cup_skill_centres_the_ball_before_closing():
-    outcome, _hw, _ = run_skill(wrist_balls=((388, 305), (428, 305)))
+    outcome, _hw, _ = run_skill(wrist_balls=((388, 292), (428, 292)))
     assert outcome.ok, outcome.error
     assert outcome.result["wrist_corrections_mm"][0][0] == pytest.approx(-16)
 
@@ -427,7 +427,7 @@ def test_ball_in_cup_fails_when_the_ball_is_seen_outside_the_mug():
 
 
 def test_ball_in_cup_skill_refuses_to_close_when_the_ball_stays_off_centre():
-    outcome, hw, _ = run_skill(wrist_balls=((300, 305),))
+    outcome, hw, _ = run_skill(wrist_balls=((300, 292),))
     assert not outcome.ok and "not closing" in outcome.error.message
     assert hw.values["goals"]["gripper"] == pytest.approx(55)
 
