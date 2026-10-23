@@ -175,8 +175,8 @@ class Serializer:
                 "$type": "CameraObservation",
                 "frame": value.frame,
                 "rgb_shape": list(value.rgb.shape),
-                "depth_shape": list(value.depth_m.shape),
-                "intrinsics": value.intrinsics.tolist(),
+                "depth_shape": None if value.depth_m is None else list(value.depth_m.shape),
+                "intrinsics": None if value.intrinsics is None else value.intrinsics.tolist(),
                 "camera_pose": self.encode(value.camera_pose, arrays),
                 "timestamp_s": value.timestamp_s,
             }
@@ -537,7 +537,7 @@ class RunRecorder:
                 rgb, np.asarray(camera.rgb, dtype=np.uint8), compress_level=PNG_COMPRESS_LEVEL
             )
             record = {"rgb": rgb.name, "frame": camera.frame}
-            if not self.depth_saved:
+            if not self.depth_saved and camera.depth_m is not None:
                 depth = directory / f"{_component(name)}-depth.npy"
                 np.save(depth, camera.depth_m, allow_pickle=False)
                 record["depth"] = depth.name

@@ -1622,7 +1622,7 @@ class CapApi:
             # Skipping it here is what keeps such a camera from breaking planning
             # for everyone else: a station that adds a wrist camera for its
             # images should not thereby lose motion planning.
-            if camera.camera_pose.frame != frame:
+            if camera.camera_pose is None or camera.camera_pose.frame != frame:
                 continue
             valid = np.isfinite(camera.depth_m) & (camera.depth_m > 0.0)
             if not bool(np.any(valid)):

@@ -266,6 +266,8 @@ def mask_to_point_cloud(
     if not isinstance(observation, CameraObservation):
         # Preserve the invalid-data ValueError contract.
         raise ValueError("observation must be a CameraObservation")
+    if observation.depth_m is None:
+        raise ValueError("RGB-only observation has no calibrated metric depth")
     if not isinstance(segmentation, Segmentation):
         # Preserve the invalid-data ValueError contract.
         raise ValueError("segmentation must be a Segmentation")

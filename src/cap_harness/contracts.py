@@ -18,6 +18,7 @@ JOINT_DIMENSIONS: Mapping[str, int] = MappingProxyType(
         "libero": 7,
         "robosuite": 7,
         "yam_real": 6,
+        "so101": 5,
     }
 )
 SUPPORTED_JOINT_DIMENSIONS = frozenset(JOINT_DIMENSIONS.values())
@@ -190,14 +191,14 @@ def _arm_vectors(
 def _joint_vector(value: object, name: str) -> np.ndarray:
     result = _array(value, name, shape=(None,))
     if result.shape[0] not in SUPPORTED_JOINT_DIMENSIONS:
-        raise ValueError(f"{name} must contain 6 or 7 joints, got {result.shape[0]}")
+        raise ValueError(f"{name} must contain 5, 6 or 7 joints, got {result.shape[0]}")
     return result
 
 
 def _joint_matrix(value: object, name: str) -> np.ndarray:
     result = _array(value, name, shape=(None, None))
     if result.shape[1] not in SUPPORTED_JOINT_DIMENSIONS:
-        raise ValueError(f"{name} waypoints must contain 6 or 7 joints, got {result.shape[1]}")
+        raise ValueError(f"{name} waypoints must contain 5, 6 or 7 joints, got {result.shape[1]}")
     return result
 
 
@@ -228,7 +229,7 @@ def _arm_poses(
     else:
         # Preserve the invalid-data ValueError contract.
         raise ValueError(f"{name} must be a Pose or mapping of arm names to Pose")
-    source = _mapping(source, name, allow_empty=False)  # type: ignore[arg-type]
+    source = _mapping(source, name, allow_empty=True)  # type: ignore[arg-type]
     result: dict[str, Pose] = {}
     for arm, pose in source.items():
         if not isinstance(pose, Pose):
@@ -281,13 +282,13 @@ class Pose:
 
 @dataclass(frozen=True, slots=True)
 class CameraObservation:
-    """Calibrated RGB-D observation from a named coordinate frame."""
+    """RGB or calibrated RGB-D; absent metric channels are explicitly None."""
 
     rgb: np.ndarray
-    depth_m: np.ndarray
-    intrinsics: np.ndarray
+    depth_m: np.ndarray | None
+    intrinsics: np.ndarray | None
     frame: str
-    camera_pose: Pose
+    camera_pose: Pose | None
     timestamp_s: float | None = None
 
     def __post_init__(self) -> None:
@@ -312,6 +313,12 @@ class CameraObservation:
             raise ValueError("floating rgb values must be in [0, 1]")
         rgb = np.array(rgb, copy=True, order="C")
         rgb.setflags(write=False)
+
+        if self.depth_m is None and self.intrinsics is None and self.camera_pose is None:
+            object.__setattr__(self, "rgb", rgb)
+            object.__setattr__(self, "frame", _non_empty_string(self.frame, "frame"))
+            object.__setattr__(self, "timestamp_s", _optional_timestamp(self.timestamp_s))
+            return
 
         depth = _array(self.depth_m, "depth_m", shape=rgb.shape[:2])
         if bool(np.any(depth < 0.0)):
@@ -361,7 +368,7 @@ class RobotState:
         poses = _arm_poses(self.end_effector_poses, "end_effector_poses")
         grippers = _arm_grippers(self.gripper_positions, "gripper_positions")
         arms = set(positions)
-        if set(velocities) != arms or set(poses) != arms or set(grippers) != arms:
+        if set(velocities) != arms or (poses and set(poses) != arms) or set(grippers) != arms:
             raise ValueError("all RobotState per-arm mappings must have identical arm names")
         for arm in arms:
             if velocities[arm].shape != positions[arm].shape:

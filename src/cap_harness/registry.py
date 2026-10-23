@@ -76,6 +76,7 @@ YAM_REAL_PUBLIC_TOOL_NAMES = frozenset(
 )
 
 _APPROVED_EMBODIMENT_PREFIXES = (
+    "so101.",
     "behavior.",
     "yam_real.",
     "libero.",
