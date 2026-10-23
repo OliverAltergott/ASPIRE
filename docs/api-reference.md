@@ -218,6 +218,11 @@ where a package currently re-exports their Python classes.
 See [Real YAM](yam-real.md) for station setup, physical motion authorization,
 arm aliases, local Mink IK, and recording. The shared API remains the same.
 
+## SO101
+
+See [SO101](so101.md) for the single-arm LeRobot adapter with RGB-only cameras,
+its interlocks, joint-space and tool-line tools, and URDF-model conventions.
+
 ## System 2
 
 The [MCP server](system2.md) exposes selected CAP tools, live observations,

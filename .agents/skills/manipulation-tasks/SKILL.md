@@ -1,6 +1,6 @@
 ---
 name: manipulation-tasks
-description: Perform task-specific real YAM manipulation with native CAP tools. Use for solving or turning a physical Rubik's Cube, bottle-cap removal and pouring, pill insertion and bottle closure, or inverted cup nesting.
+description: Perform task-specific real YAM or SO101 manipulation with native CAP tools. Use for solving or turning a physical Rubik's Cube, bottle-cap removal and pouring, pill insertion and bottle closure, inverted cup nesting, or SO101 ball-into-cup pick and place.
 ---
 
 # Manipulation tasks
@@ -18,3 +18,4 @@ Other task recipes (read only the one matching the operator's task):
 - [Unscrew and pour](../../../examples/yam_real/unscrew_bottle/TASK_CONTEXT.md): stabilize the table-supported bottle, turn and regrasp the cap, verify detachment, and pour onto the table.
 - [Pill insertion and bottle closure](../../../examples/yam_real/pill_in_bottle/TASK_CONTEXT.md): acquire the pill, verify entry, seat the cap, and distinguish threaded seating from unverified final tightness.
 - [Inverted cup nesting](../../../examples/yam_real/cup_stacking/TASK_CONTEXT.md): count all cups, orient the opening downward, establish insertion before release, and recover without disturbing the existing stack.
+- [SO101 ball into a cup](../../../examples/so101/ball_in_cup/TASK_CONTEXT.md): RGB-only grasp by sliding along the fingers at about 38° pitch, verify retention, align over the cup at rim height, and release.

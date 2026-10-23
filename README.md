@@ -95,7 +95,8 @@ all ten tasks in the libero_goal_swap suite.
 Before executing, report the required GPUs, credentials, gated weights,
 services, expected runtime, seed partitions, and output paths. Wait for
 my confirmation before launching. Do not access real-robot code or instructions
-(AGENTS.md, docs/system2*.md, docs/yam-real.md, src/cap_harness/yam_real/).
+(AGENTS.md, docs/system2*.md, docs/yam-real.md, docs/so101.md, src/cap_harness/yam_real/,
+src/cap_harness/so101/).
 ```
 
 Before running, set up the host (CUDA, uv, and the Hugging Face token for the gated SAM3 weights) with [`docs/host-setup.md`](docs/host-setup.md).
