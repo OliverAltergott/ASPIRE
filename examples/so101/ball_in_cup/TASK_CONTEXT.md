@@ -11,7 +11,9 @@ inside an upright mug, then verify it rests inside. Read [SO101](../../../docs/s
 for the session, interlocks, tools and frame conventions. Positions below are
 URDF-model millimetres in `so101_base`; pitch is degrees below horizontal.
 
-Find the ball numerically first, and re-sample its HSV whenever the light changes. A pale
+Find the ball and the cup numerically first. With a SAM3 service, `so101.segment_text("green ball")`
+and `so101.segment_text("mug")` give boxes and centroids in both views (about 5 s per camera)
+and do not depend on lighting. Otherwise use `so101.detect_color`, and re-sample the HSV whenever the light changes. A pale
 mint ball first segmented with `so101.detect_color([64, 35, 60], [92, 255, 255],
 min_fill=0.6)` when the table's saturation was below 20. Under cooler light the table
 read H≈86, S≈35, and only `[60, 80, 80]–[95, 255, 255]` isolated the ball.

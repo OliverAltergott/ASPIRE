@@ -95,7 +95,7 @@ all ten tasks in the libero_goal_swap suite.
 Before executing, report the required GPUs, credentials, gated weights,
 services, expected runtime, seed partitions, and output paths. Wait for
 my confirmation before launching. Do not access real-robot code or instructions
-(AGENTS.md, docs/system2*.md, docs/yam-real.md, docs/so101.md, src/cap_harness/yam_real/,
+(AGENTS.md, docs/system2*.md, docs/yam-real.md, docs/so101*.md, src/cap_harness/yam_real/,
 src/cap_harness/so101/).
 ```
 

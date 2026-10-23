@@ -5,7 +5,9 @@ requests {"program": "result = get_observation()"}. Each response names the save
 CAP trace, state, fresh camera images and view.jpg (all cameras side by side, for
 one image read per check). Startup never enables torque. Agent shells that cannot
 hold a pipe open can follow a file: ``tail -n +1 -f commands.jsonl | python -m
-cap_harness.so101 ... --stdio > replies.jsonl``. --record writes a continuous video.
+cap_harness.so101 ... --stdio > replies.jsonl``. --mcp serves the same tools to a
+coding agent through ASPIRE's System 2 MCP session (cap_harness.so101.system2), and
+--sam3-url adds so101.segment_text. --record writes a continuous video.
 """
 
 from __future__ import annotations
@@ -105,9 +107,12 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-motion", action="store_true")
     parser.add_argument("--record", action="store_true", help="write OUTPUT/session-<time>.mp4 at 10 fps")
+    parser.add_argument("--sam3-url", help="SAM3 service, e.g. http://127.0.0.1:8114")
+    parser.add_argument("--mcp-port", type=int, default=8222)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--program", type=Path)
     mode.add_argument("--stdio", action="store_true")
+    mode.add_argument("--mcp", action="store_true", help="serve MCP at http://127.0.0.1:PORT/mcp/")
     args = parser.parse_args()
     output = args.output.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -115,7 +120,12 @@ def main():
                               calibration_dir=args.calibration_dir.expanduser(), cameras=args.cameras)
     recorder = None
     with (output / "commands.jsonl").open("a", buffering=1) as log:
-        adapter = So101Adapter(hardware, allow_motion=args.allow_motion,
+        segmentation = None
+        if args.sam3_url:
+            from cap_harness.providers.sam3 import Sam3Provider
+
+            segmentation = Sam3Provider(base_url=args.sam3_url)
+        adapter = So101Adapter(hardware, allow_motion=args.allow_motion, segmentation_provider=segmentation,
                               event_sink=lambda e: log.write(json.dumps(e, allow_nan=False) + "\n"))
         try:
             if args.record:
@@ -123,6 +133,19 @@ def main():
                 recorder.start()
             if args.program:
                 return 0 if run(adapter, args.program.read_text(), output) else 1
+            if args.mcp:
+                import uvicorn
+
+                from .system2 import create_so101_app
+
+                with (output / "tools.jsonl").open("a", buffering=1) as tools:
+                    app, session = create_so101_app(
+                        adapter, tool_result_sink=lambda **r: tools.write(json.dumps(r, default=str) + "\n"))
+                    try:
+                        uvicorn.run(app, host="127.0.0.1", port=args.mcp_port)
+                    finally:
+                        session.close()
+                return 0
             print(json.dumps({"ready": True, "motion_authorized": args.allow_motion,
                               "torque": "unchanged", "tools": list(adapter.register_tools().public_tools())}), flush=True)
             for line in sys.stdin:

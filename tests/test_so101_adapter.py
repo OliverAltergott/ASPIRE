@@ -272,3 +272,53 @@ def test_go_to_joint_and_tool_targets_and_floor_refusal():
     assert not adapter.go_to(joints_deg=low).ok
     assert not adapter.go_to(xyz_mm=[0, 0, 900], pitch=40).ok
     assert not hw.writes
+
+
+class FakeSegmentation:
+    def segment_text(self, observation, query):
+        from cap_harness.contracts import Segmentation, SegmentationSet
+
+        mask = np.zeros(observation.rgb.shape[:2], dtype=bool)
+        mask[1:3, 2:4] = True
+        return SegmentationSet(ok=True, segmentations=[Segmentation(
+            mask=mask, label=query, score=0.9, camera_name=observation.frame, frame=observation.frame,
+            box_xyxy=np.array([2.0, 1.0, 3.0, 2.0]))])
+
+
+def test_segment_text_reports_box_and_mask_centroid_per_camera():
+    adapter = So101Adapter(Hardware(), segmentation_provider=FakeSegmentation())
+    assert "so101.segment_text" in adapter.register_tools().public_tools()
+    detections = adapter.segment_text("ball", "wrist")
+    assert detections == {"wrist": [{"score": 0.9, "box_xyxy": [2.0, 1.0, 3.0, 2.0],
+                                      "center_px": [2.5, 1.5], "area_px": 4}]}
+    assert "so101.segment_text" not in So101Adapter(Hardware()).register_tools().public_tools()
+
+
+def test_mcp_bridge_serves_so101_tools_with_one_image_per_observe():
+    pytest.importorskip("mcp")
+    from mcp.types import ImageContent
+
+    from cap_harness.so101.system2 import So101McpBridge, create_so101_app
+
+    hw = Hardware()
+    adapter = So101Adapter(hw, allow_motion=True, sleep=lambda _seconds: None)
+    _app, session = create_so101_app(adapter)
+    try:
+        bridge = So101McpBridge(session)
+        names = {spec.name for spec in bridge.tool_specs()}
+        assert {"observe", "cap_so101__move_tool", "cap_so101__go_to", "cap_set_gripper"} <= names
+        assert not any(name.startswith("cap_program_") for name in names)
+        assert "cap_so101__segment_text" not in names
+
+        def images(result):
+            return [item for item in result.content if isinstance(item, ImageContent)]
+
+        observed = bridge.call("observe", {})
+        assert not observed.isError and len(images(observed)) == 1
+        enabled = bridge.call("cap_so101__enable", {})
+        assert not enabled.isError, enabled.content[0].text
+        moved = bridge.call("cap_so101__move_delta", {"deltas_deg": {"shoulder_pan": 1}})
+        assert not moved.isError and not images(moved)
+        assert hw.values["goals"]["shoulder_pan"] == 11
+    finally:
+        session.close()

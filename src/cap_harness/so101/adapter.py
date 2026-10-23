@@ -31,6 +31,7 @@ MOTORS = (*JOINTS, "gripper")
 PUBLIC_EXTENSIONS = frozenset({
     "so101.enable", "so101.move_delta", "so101.get_telemetry",
     "so101.move_tool", "so101.go_to", "so101.close_until_contact", "so101.detect_color",
+    "so101.segment_text",
 })
 # Seeds for absolute tool targets: reach-forward configurations at shallow and steep pitch.
 IK_SEEDS_DEG = ((0, -73, 85, 26), (0, -20, 75, -17), (0, 0, 40, 0), (0, -40, 20, 70))
@@ -51,9 +52,10 @@ class So101Adapter:
     arms = ("primary",)
 
     def __init__(self, hardware, *, allow_motion=False, sleep=time.sleep, event_sink=None,
-                 table_floor_mm=-8.0):
+                 table_floor_mm=-8.0, segmentation_provider=None):
         self.hardware = hardware
         self.allow_motion = allow_motion
+        self.segmentation_provider = segmentation_provider
         self.table_floor_mm = table_floor_mm
         self._sleep = sleep
         self._event_sink = event_sink or (lambda _event: None)
@@ -398,6 +400,34 @@ class So101Adapter:
             blobs[name] = sorted(found, key=lambda blob: blob["area_px"], reverse=True)[:5]
         return blobs
 
+    def segment_text(self, query: str, camera_names=None, min_score: float = 0.3):
+        """Text-prompted 2D detection (SAM3) in a fresh observation of each camera.
+
+        Returns {camera: [{"score", "box_xyxy", "center_px", "area_px"}]}, best first and at
+        most three per camera; center_px is the mask centroid. RGB only: no depth or 3D.
+        """
+        observation = self.get_observation()
+        names = observation.cameras if camera_names is None else (
+            (camera_names,) if isinstance(camera_names, str) else tuple(camera_names))
+        detections = {}
+        for name in names:
+            result = self.segmentation_provider.segment_text(observation.cameras[name], query)
+            if not result.ok:
+                if result.error.code != ErrorCode.NO_SEGMENTATION:
+                    raise RuntimeError(f"{name}: {result.error.message}")
+                detections[name] = []
+                continue
+            found = []
+            for segmentation in result.segmentations:
+                rows, cols = np.nonzero(segmentation.mask)
+                if segmentation.score >= min_score and rows.size:
+                    found.append({"score": round(float(segmentation.score), 3),
+                                  "box_xyxy": np.round(segmentation.box_xyxy, 1).tolist(),
+                                  "center_px": [round(float(cols.mean()), 1), round(float(rows.mean()), 1)],
+                                  "area_px": int(rows.size)})
+            detections[name] = found[:3]
+        return detections
+
     def register_tools(self):
         registry = ToolRegistry(public_extension_allowlist=PUBLIC_EXTENSIONS)
         for name, function in {
@@ -408,6 +438,7 @@ class So101Adapter:
             "so101.move_tool": self.move_tool, "so101.go_to": self.go_to,
             "so101.close_until_contact": self.close_until_contact,
             "so101.detect_color": self.detect_color,
+            **({"so101.segment_text": self.segment_text} if self.segmentation_provider is not None else {}),
         }.items():
             registry.register(function, name=name, layer="so101", capability="joint-space-rgb", public=True)
         return registry
