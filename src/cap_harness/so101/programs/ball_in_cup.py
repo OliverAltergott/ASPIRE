@@ -1,16 +1,17 @@
 """Ball-into-cup skill: one CAP program, no agent round trips.
 
-See examples/so101/ball_in_cup/TASK_CONTEXT.md. Needs the SO101 runtime with --sam3-url
-(and, once recorded, --overhead-calibration); run it with --program this file, or over
-MCP as cap_program_ball_in_cup. SAM3 locates the ball and the
+See examples/so101/ball_in_cup/TASK_CONTEXT.md. Needs the SO101 runtime with --sam3-url;
+run it with --program this file, or over MCP as cap_program_ball_in_cup. SAM3 locates the ball and the
 mug once in the external view; the recipe's grasp (38 degree pitch, tool 14 mm past the
 ball centre at z = 0) and placement (released at rim height) run as continuous moves.
 Before closing, the wrist view must show the ball where successful closes had it; the
 program corrects up to twice and otherwise stops without closing.
 
-With CALIBRATE_OVERHEAD = True the held ball also visits six poses per plane and the
-result carries "calibration_records"; fit them with
-`python -m cap_harness.so101.calibration result.json overhead.json`.
+Placement maps the mug's pixel to a release tool position with a similarity fit over
+releases that verifiably landed (RELEASES). A held ball cannot calibrate this: closing
+pushes it 2-3 cm off the tool axis, and from the external camera the gripper hides its
+inner part, which biased held-ball centroids by about 15 px. After a verified success,
+the result's "release" pair can be appended to RELEASES.
 """
 
 import math
@@ -18,21 +19,17 @@ import math
 REST = [-5.0, -106.3, 66.7, 97.2, -84.8]
 PITCH = 38.0
 SIN, COS = math.sin(math.radians(PITCH)), math.cos(math.radians(PITCH))
-# Fallback station data when no calibration is loaded: two pixel -> mm pairs per height
-# from earlier runs, reliable only near those pixels.
+# Station data. TABLE: two pixel -> ball pairs (the ball 14 mm behind the grasping tool),
+# reliable only near those pixels; the wrist check corrects grasp errors up to 25 mm.
+# RELEASES: verified releases, (mug centre pixel, release tool x, y in mm) at PLACE_Z.
 TABLE = ((370, 228, 219, 101), (386, 292, 276, 7))
-RIM = ((346, 354, 223, -80), (384, 146, 238, 193))
+RELEASES = (((346, 354), (237.0, -85.6)), ((384, 146), (249.3, 201.8)), ((382.5, 142), (236.5, 198.5)))
+PLACE_Z = 102.0
 # Wrist view (640x480) of the ball just before the two successful closes: centres
 # (439, 307) and (417, 303), about 100 px across, so about 2.5 px/mm sideways; moving
 # along the fingers shifted the ball about 2.7 px/mm vertically.
 WRIST_TARGET, WRIST_TOLERANCE_PX = (428, 305), 12
 LATERAL_PX_PER_MM, ALONG_PX_PER_MM = 2.5, 2.7
-CALIBRATE_OVERHEAD = False
-# Tool poses (z mm, [(radius mm, heading deg)]) for the held ball, at least 100 mm from the mug.
-CALIBRATION_POSES = (
-    ("table", 10.0, ((245, -25), (300, -25), (245, 0), (305, 0), (245, 22), (300, 18))),
-    ("rim", 102.0, ((300, 20), (300, -15), (240, -15), (240, 20), (240, 60), (300, 75))),
-)
 
 
 def two_point(pairs, pixel):
@@ -45,47 +42,27 @@ def two_point(pairs, pixel):
     return [x1 + real * pu - imag * pw, y1 + imag * pu + real * pw]
 
 
-def to_base(plane, pixel):
-    try:
-        return so101.pixel_to_base(pixel, plane), "calibration"
-    except Exception:
-        return two_point(TABLE if plane == "table" else RIM, pixel), "two-point fallback"
-
-
-def held_ball_mm():
-    model = so101.get_telemetry()["urdf_model"]
-    x, y = model["tool_xyz_mm"][0], model["tool_xyz_mm"][1]
-    pitch, heading = math.radians(model["pitch_deg"]), math.atan2(y, x)
-    return [x - 18 * math.cos(pitch) * math.cos(heading), y - 18 * math.cos(pitch) * math.sin(heading)]
-
-
-def affine_map(pairs):
-    """Least-squares affine pixel -> mm from (u, v, x, y) pairs; None if degenerate."""
-    normal = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
-    rhs = [[0.0] * 3, [0.0] * 3]
-    for u, v, x, y in pairs:
-        row = (u, v, 1.0)
-        for i in range(3):
-            rhs[0][i] += row[i] * x
-            rhs[1][i] += row[i] * y
-            for j in range(3):
-                normal[i][j] += row[i] * row[j]
-
-    def det(m):
-        return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
-
-    scale = det(normal)
-    if abs(scale) < 1e-6:
-        return None
-    coefficients = [[det([[b[r] if c == k else normal[r][c] for c in range(3)] for r in range(3)]) / scale
-                     for k in range(3)] for b in rhs]
-    return lambda pixel: [c[0] * pixel[0] + c[1] * pixel[1] + c[2] for c in coefficients]
-
-
 def tool_for(xy, z, offset_mm=14.0):
     heading = math.atan2(xy[1], xy[0])
     return [xy[0] + offset_mm * math.cos(heading), xy[1] + offset_mm * math.sin(heading), z]
+
+
+def release_tool_xy(pixel):
+    # Least-squares similarity (scale, rotation, shift) from RELEASES; image v points down.
+    count = len(RELEASES)
+    mu = sum(r[0][0] for r in RELEASES) / count
+    mw = -sum(r[0][1] for r in RELEASES) / count
+    mx = sum(r[1][0] for r in RELEASES) / count
+    my = sum(r[1][1] for r in RELEASES) / count
+    norm = real = imag = 0.0
+    for (u, v), (x, y) in RELEASES:
+        du, dw, dx, dy = u - mu, -v - mw, x - mx, y - my
+        norm += du * du + dw * dw
+        real += du * dx + dw * dy
+        imag += du * dy - dw * dx
+    real, imag = real / norm, imag / norm
+    du, dw = pixel[0] - mu, -pixel[1] - mw
+    return [mx + real * du - imag * dw, my + imag * du + real * dw]
 
 
 def check(step, outcome):
@@ -148,8 +125,7 @@ seen = so101.segment_text(["green ball", "mug"], "external")
 ball_seen, mug_seen = seen["green ball"]["external"], seen["mug"]["external"]
 if not ball_seen or not mug_seen:
     raise ValueError(f"SAM3 did not find both objects: ball={ball_seen}, mug={mug_seen}")
-ball, mapping = to_base("table", ball_seen[0]["center_px"])
-mug, mug_mapping = to_base("rim", mug_seen[0]["center_px"])
+ball = two_point(TABLE, ball_seen[0]["center_px"])
 
 grasp = tool_for(ball, 0.0)
 standoff = stage_behind(grasp)
@@ -161,27 +137,8 @@ check("lift", so101.move_tool([0, 0, 70]))
 if so101.get_telemetry()["positions"]["gripper"] < 19:
     raise ValueError("The gripper closed further after lifting: the ball was not retained")
 
-records = []
-if CALIBRATE_OVERHEAD:
-    for plane, z, poses in CALIBRATION_POSES:
-        for radius, degrees in poses:
-            check("calibrate", move_to([radius * math.cos(math.radians(degrees)),
-                                        radius * math.sin(math.radians(degrees)), z]))
-            held = so101.segment_text("green ball", "external")["external"]
-            if held:
-                positions = so101.get_telemetry()["positions"]
-                records.append({"plane": plane, "pixel": held[0]["center_px"], "ball_mm": held_ball_mm(),
-                                "joints_deg": [positions[j] for j in
-                                               ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")]})
-    here = tool_now()
-    check("clear", move_to([here[0], here[1], 130.0]))
-    # The rim-height records just taken locate the mug better than the fallback pairs.
-    rim_map = affine_map([(r["pixel"][0], r["pixel"][1], r["ball_mm"][0], r["ball_mm"][1])
-                          for r in records if r["plane"] == "rim"])
-    if rim_map is not None:
-        mug, mug_mapping = rim_map(mug_seen[0]["center_px"]), "in-run affine"
-
-place = tool_for(mug, 102.0)
+place_xy = release_tool_xy(mug_seen[0]["center_px"])
+place = [place_xy[0], place_xy[1], PLACE_Z]
 here = tool_now()
 check("carry", move_to([(here[0] + place[0]) / 2, (here[1] + place[1]) / 2, 130.0]))
 check("carry", move_to([place[0], place[1], 130.0]))
@@ -194,7 +151,10 @@ after = so101.segment_text(["green ball", "mug"], "external")
 ball_after, mug_after = after["green ball"]["external"], after["mug"]["external"] or mug_seen
 x0, y0, x1, y1 = mug_after[0]["box_xyxy"]
 inside = bool(ball_after) and x0 <= ball_after[0]["center_px"][0] <= x1 and y0 <= ball_after[0]["center_px"][1] <= y1
-result = {"map": mapping, "mug_map": mug_mapping, "standoff_mm": standoff, "ball_mm": [round(v) for v in ball], "mug_mm": [round(v) for v in mug],
+result = {"standoff_mm": standoff, "ball_mm": [round(v) for v in ball], "place_tool_mm": [round(v) for v in place],
           "wrist_corrections_mm": corrections, "contact_opening": contact.diagnostics["opening"],
-          "ball_in_mug_box": inside, "calibration_records": records}
-print({key: value for key, value in result.items() if key != "calibration_records"})
+          "ball_in_mug_box": inside, "ball_seen_after_px": ball_after[0]["center_px"] if ball_after else None,
+          "release": [mug_seen[0]["center_px"], [round(v, 1) for v in place_xy]]}
+print(result)
+if ball_after and not inside:
+    raise ValueError(f"The ball ended outside the mug, at external pixel {ball_after[0]['center_px']}: {result}")

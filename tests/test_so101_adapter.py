@@ -324,14 +324,42 @@ def test_mcp_bridge_serves_so101_tools_with_one_image_per_observe():
         session.close()
 
 
+REST_POSE = [-5.0, -106.3, 66.7, 97.2, -84.8]
+
+
+class SceneHardware(StallingHardware):
+    """Stalls the jaws on the ball and remembers the arm pose at which it was released."""
+
+    def __init__(self):
+        super().__init__()
+        self.opened = self.held = False
+        self.release_pose = None
+
+    def frames(self):
+        return {name: (np.zeros((480, 640, 3), dtype=np.uint8), time.time()) for name in ("external", "wrist")}
+
+    def write(self, goals):
+        super().write(goals)
+        if "gripper" in goals:
+            if goals["gripper"] > 40 and not self.held:
+                self.opened = True
+            elif self.opened and goals["gripper"] < 20:
+                self.held = True
+            elif self.held and goals["gripper"] > 40:
+                self.held, self.release_pose = False, [self.values["goals"][j] for j in JOINTS]
+
+
 class SceneSegmentation:
-    """Fake SAM3: the ball and mug where the real scene had them; successive wrist views
-    report the given ball centres, repeating the last.
+    """Fake SAM3: the resting ball and the mug where the real scene had them; after release
+    the ball is reported inside the mug unless after_release says otherwise. Successive
+    wrist views report the given ball centres, repeating the last.
     """
 
     def __init__(self, wrist_balls=((428, 305),)):
         self.centres = {("external", "green ball"): (385, 290), ("external", "mug"): (382, 142)}
         self.wrist_balls = list(wrist_balls)
+        self.hardware = None
+        self.after_release = None
         self.calls = []
 
     def segment_text(self, observation, query):
@@ -339,8 +367,12 @@ class SceneSegmentation:
 
         camera = observation.frame.removesuffix("_optical")
         self.calls.append((camera, query))
-        u, v = self.wrist_balls.pop(0) if len(self.wrist_balls) > 1 and camera == "wrist" else (
-            self.wrist_balls[0] if camera == "wrist" else self.centres[(camera, query)])
+        if camera == "wrist":
+            u, v = self.wrist_balls.pop(0) if len(self.wrist_balls) > 1 else self.wrist_balls[0]
+        elif query == "green ball" and self.hardware.release_pose is not None:
+            u, v = self.after_release or self.centres[("external", "mug")]
+        else:
+            u, v = self.centres[(camera, query)]
         mask = np.zeros(observation.rgb.shape[:2], dtype=bool)
         mask[v - 5:v + 6, u - 5:u + 6] = True
         return SegmentationSet(ok=True, segmentations=[Segmentation(
@@ -348,23 +380,16 @@ class SceneSegmentation:
             box_xyxy=np.array([u - 30.0, v - 30.0, u + 30.0, v + 30.0]))])
 
 
-class SceneHardware(StallingHardware):
-    def frames(self):
-        return {name: (np.zeros((480, 640, 3), dtype=np.uint8), time.time()) for name in ("external", "wrist")}
-
-
-def run_skill(calibration=None, wrist_balls=((428, 305),), calibrate=False, segmentation=None):
+def run_skill(wrist_balls=((428, 305),), segmentation=None):
     from pathlib import Path
 
     hw = SceneHardware()
-    hw.values["positions"].update(dict(zip(JOINTS, [-5.0, -106.3, 66.7, 97.2, -84.8], strict=True)), gripper=2.0)
+    hw.values["positions"].update(dict(zip(JOINTS, REST_POSE, strict=True)), gripper=2.0)
     segmentation = segmentation or SceneSegmentation(wrist_balls)
     segmentation.hardware = hw
     adapter = So101Adapter(hw, allow_motion=True, sleep=lambda _seconds: None, segmentation_provider=segmentation,
-                           speed_deg_s=60.0, overhead_calibration=calibration)
+                           speed_deg_s=60.0)
     source = (Path(__file__).parents[1] / "src/cap_harness/so101/programs/ball_in_cup.py").read_text()
-    if calibrate:
-        source = source.replace("CALIBRATE_OVERHEAD = False", "CALIBRATE_OVERHEAD = True")
     return ProgramExecutor(adapter.register_tools()).execute_program(source), hw, segmentation
 
 
@@ -372,93 +397,39 @@ def test_ball_in_cup_skill_runs_end_to_end_with_fallback_maps():
     outcome, hw, segmentation = run_skill()
     assert outcome.ok, outcome.error
     result = outcome.result
-    assert result["map"] == "two-point fallback" and result["wrist_corrections_mm"] == ()
-    assert result["contact_opening"] == pytest.approx(0.2)
+    assert result["wrist_corrections_mm"] == ()
+    assert result["contact_opening"] == pytest.approx(0.2) and result["ball_in_mug_box"]
     assert ("wrist", "green ball") in segmentation.calls
-    np.testing.assert_allclose(arm_goals(hw), [-5.0, -106.3, 66.7, 97.2, -84.8], atol=1e-6)
+    np.testing.assert_allclose(arm_goals(hw), REST_POSE, atol=1e-6)
     assert hw.values["goals"]["gripper"] == pytest.approx(48)
 
 
-def test_ball_in_cup_skill_uses_calibration_and_centres_the_ball():
-    from cap_harness.so101.calibration import fit_homography
-
-    pixels = np.array([[300, 250], [450, 250], [300, 350], [450, 350], [380, 300]], float)
-    points = np.c_[pixels[:, 1] * -1.5 + 710, pixels[:, 0] * -1.5 + 590]  # any plausible projective map
-    table = {"homography": fit_homography(pixels, points).tolist()}
-    rim = {"homography": fit_homography(pixels - [0, 150], points + [-40, 190]).tolist()}
-    outcome, hw, _ = run_skill({"planes": {"table": table, "rim": rim}}, wrist_balls=((388, 305), (428, 305)))
+def test_ball_in_cup_skill_centres_the_ball_before_closing():
+    outcome, _hw, _ = run_skill(wrist_balls=((388, 305), (428, 305)))
     assert outcome.ok, outcome.error
-    assert outcome.result["map"] == "calibration"
     assert outcome.result["wrist_corrections_mm"][0][0] == pytest.approx(-16)
 
 
-def test_homography_fit_recovers_projective_map_and_ball_centre_offset():
-    from cap_harness.so101.calibration import ball_centre_mm, fit_homography, pixel_to_plane
+def test_ball_in_cup_releases_where_verified_releases_put_the_ball():
+    segmentation = SceneSegmentation()
+    segmentation.centres[("external", "mug")] = (382, 142)  # the mug pixel of a verified release
+    outcome, hw, _ = run_skill(segmentation=segmentation)
+    assert outcome.ok, outcome.error
+    np.testing.assert_allclose(tool_xyz_mm(hw.release_pose)[:2], [236.5, 198.5], atol=8)
 
-    truth = np.array([[1.2, 0.1, 30.0], [-0.05, -1.4, 600.0], [1e-4, 2e-4, 1.0]])
-    pixels = np.array([[100, 80], [500, 90], [120, 400], [520, 420], [300, 250], [200, 330]], float)
-    points = [(truth @ [u, v, 1])[:2] / (truth @ [u, v, 1])[2] for u, v in pixels]
-    fitted = fit_homography(pixels, points)
-    np.testing.assert_allclose(pixel_to_plane(fitted, [333, 222]),
-                               (truth @ [333, 222, 1])[:2] / (truth @ [333, 222, 1])[2], atol=1e-6)
-    grasp = [0.0, 0.0, 62.0, -24.0, -85.0]
-    offset = tool_xyz_mm(grasp) - ball_centre_mm(grasp)
-    assert np.linalg.norm(offset) == pytest.approx(18.0)
+
+def test_ball_in_cup_fails_when_the_ball_is_seen_outside_the_mug():
+    segmentation = SceneSegmentation()
+    segmentation.centres[("external", "mug")] = (200, 100)
+    segmentation.after_release = (385, 290)
+    outcome, _hw, _ = run_skill(segmentation=segmentation)
+    assert not outcome.ok and "outside the mug" in outcome.error.message
 
 
 def test_ball_in_cup_skill_refuses_to_close_when_the_ball_stays_off_centre():
     outcome, hw, _ = run_skill(wrist_balls=((300, 305),))
     assert not outcome.ok and "not closing" in outcome.error.message
     assert hw.values["goals"]["gripper"] == pytest.approx(55)
-
-
-def test_ball_in_cup_skill_records_overhead_calibration_with_the_held_ball():
-    from cap_harness.so101.calibration import ball_centre_mm
-
-    camera = np.array([[0.0, -0.75, 400.0], [-0.72, 0.0, 470.0], [0.0, 1.2e-4, 1.0]])  # base mm -> pixel
-    mug_mm = np.array([218.0, 231.0])
-    u, v, w = camera @ [*mug_mm, 1.0]
-
-    class HeldBallCamera(SceneSegmentation):
-        hardware = None
-
-        def segment_text(self, observation, query):
-            if observation.frame.startswith("external") and query == "green ball" and \
-                    self.hardware.values["goals"]["gripper"] < 30:
-                x, y, _ = ball_centre_mm(arm_goals(self.hardware))
-                bu, bv, bw = camera @ [x, y, 1.0]
-                self.centres[("external", "green ball")] = (round(bu / bw), round(bv / bw))
-            return super().segment_text(observation, query)
-
-    segmentation = HeldBallCamera()
-    segmentation.centres[("external", "mug")] = (round(u / w), round(v / w))
-    outcome, hw, _ = run_skill(calibrate=True, segmentation=segmentation)
-    assert outcome.ok, outcome.error
-    records = outcome.result["calibration_records"]
-    assert [r["plane"] for r in records] == ["table"] * 6 + ["rim"] * 6
-    assert outcome.result["mug_map"] == "in-run affine"
-    np.testing.assert_allclose(outcome.result["mug_mm"], mug_mm, atol=6)  # affine vs projective, pixel rounding
-    np.testing.assert_allclose(arm_goals(hw), [-5.0, -106.3, 66.7, 97.2, -84.8], atol=1e-6)
-
-
-def test_fit_records_recovers_the_camera_map_from_held_ball_poses():
-    from cap_harness.so101.calibration import ball_centre_mm, fit_records, pixel_to_plane
-    from cap_harness.so101.kinematics import solve_tool_pose
-
-    camera = np.array([[0.0, -0.6, 400.0], [-0.6, 0.0, 450.0], [0.0, 1e-4, 1.0]])  # base mm -> pixel
-    seeds = [[0, -73, 85, 26, -85], [0, -20, 75, -17, -85], [0, 0, 40, 0, -85]]
-    records = []
-    for radius, degrees in ((245, -25), (300, -25), (245, 0), (305, 0), (245, 22), (300, 18)):
-        heading = np.radians(degrees)
-        joints = solve_tool_pose([radius * np.cos(heading), radius * np.sin(heading), 10.0], 38.0,
-                                 [[-117, 117], [-107, 107], [-97, 97], [-103, 103], [-180, 180]], seeds)
-        x, y, _ = ball_centre_mm(joints)
-        u, v, w = camera @ [x, y, 1.0]
-        records.append({"plane": "table", "joints_deg": joints.tolist(), "pixel": [u / w, v / w]})
-    table = fit_records(records)["planes"]["table"]
-    assert table["points"] == 6 and table["rms_mm"] < 0.01
-    expected = ball_centre_mm(records[2]["joints_deg"])[:2]
-    np.testing.assert_allclose(pixel_to_plane(table["homography"], records[2]["pixel"]), expected, atol=1e-3)
 
 
 def test_mcp_agent_runs_the_reviewed_ball_in_cup_program_in_one_call():
@@ -469,8 +440,10 @@ def test_mcp_agent_runs_the_reviewed_ball_in_cup_program_in_one_call():
 
     hw = SceneHardware()
     hw.values["positions"].update(dict(zip(JOINTS, [-5.0, -106.3, 66.7, 97.2, -84.8], strict=True)), gripper=2.0)
+    segmentation = SceneSegmentation()
+    segmentation.hardware = hw
     adapter = So101Adapter(hw, allow_motion=True, sleep=lambda _seconds: None,
-                           segmentation_provider=SceneSegmentation(), speed_deg_s=60.0)
+                           segmentation_provider=segmentation, speed_deg_s=60.0)
     _app, session = create_so101_app(adapter)
     try:
         bridge = So101McpBridge(session)

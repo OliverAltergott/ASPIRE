@@ -12,7 +12,7 @@ ASPIRE_PERMISSIONS=()
 for ASPIRE_TOOL in get_capability_graph observe get_job read_operator_messages cap_get_robot_state \
   cap_move_to_joints cap_set_gripper cap_so101__enable cap_so101__get_telemetry cap_so101__move_delta \
   cap_so101__move_tool cap_so101__go_to cap_so101__close_until_contact cap_so101__detect_color \
-  cap_so101__segment_text cap_so101__pixel_to_base cap_program_ball_in_cup; do
+  cap_so101__segment_text cap_program_ball_in_cup; do
   ASPIRE_PERMISSIONS+=(-c "mcp_servers.cap.tools.$ASPIRE_TOOL.approval_mode=\"approve\"")
 done
 ASPIRE_MODE=()

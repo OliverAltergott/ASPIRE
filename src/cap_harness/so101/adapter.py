@@ -24,7 +24,6 @@ from cap_harness.contracts import (
 from cap_harness.errors import ApiError, ErrorCode
 from cap_harness.registry import ToolRegistry
 
-from .calibration import pixel_to_plane
 from .kinematics import pitch_deg, plan_joint_path, plan_tool_path, solve_tool_pose, tool_xyz_mm
 
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
@@ -32,7 +31,7 @@ MOTORS = (*JOINTS, "gripper")
 PUBLIC_EXTENSIONS = frozenset({
     "so101.enable", "so101.move_delta", "so101.get_telemetry",
     "so101.move_tool", "so101.go_to", "so101.close_until_contact", "so101.detect_color",
-    "so101.segment_text", "so101.pixel_to_base",
+    "so101.segment_text",
 })
 # Seeds for absolute tool targets: reach-forward configurations at shallow and steep pitch.
 IK_SEEDS_DEG = ((0, -73, 85, 26), (0, -20, 75, -17), (0, 0, 40, 0), (0, -40, 20, 70))
@@ -55,10 +54,8 @@ class So101Adapter:
     arms = ("primary",)
 
     def __init__(self, hardware, *, allow_motion=False, sleep=time.sleep, event_sink=None,
-                 table_floor_mm=-8.0, segmentation_provider=None, speed_deg_s=20.0, gripper_speed=50.0,
-                 overhead_calibration=None):
+                 table_floor_mm=-8.0, segmentation_provider=None, speed_deg_s=20.0, gripper_speed=50.0):
         self.hardware = hardware
-        self.overhead_calibration = overhead_calibration
         self.allow_motion = allow_motion
         self.speed_deg_s = speed_deg_s
         self.gripper_speed = gripper_speed
@@ -462,14 +459,6 @@ class So101Adapter:
                               "area_px": int(rows.size)})
         return found[:3]
 
-    def pixel_to_base(self, pixel, plane: str = "table"):
-        """External-camera pixel to so101_base [x, y] mm on a calibrated plane.
-
-        "table" is a ball resting on the table; "rim" is a ball held at mug-rim height.
-        """
-        calibration = self.overhead_calibration["planes"][plane]
-        return [round(value, 1) for value in pixel_to_plane(calibration["homography"], pixel)]
-
     def register_tools(self):
         registry = ToolRegistry(public_extension_allowlist=PUBLIC_EXTENSIONS)
         for name, function in {
@@ -481,7 +470,6 @@ class So101Adapter:
             "so101.close_until_contact": self.close_until_contact,
             "so101.detect_color": self.detect_color,
             **({"so101.segment_text": self.segment_text} if self.segmentation_provider is not None else {}),
-            **({"so101.pixel_to_base": self.pixel_to_base} if self.overhead_calibration is not None else {}),
         }.items():
             registry.register(function, name=name, layer="so101", capability="joint-space-rgb", public=True)
         return registry

@@ -30,7 +30,7 @@ from cap_harness.agent.session import LiveAgentSession
 DIRECT_TOOLS = frozenset({
     "get_robot_state", "move_to_joints", "set_gripper",
     "so101.enable", "so101.get_telemetry", "so101.move_delta", "so101.move_tool", "so101.go_to",
-    "so101.close_until_contact", "so101.detect_color", "so101.segment_text", "so101.pixel_to_base",
+    "so101.close_until_contact", "so101.detect_color", "so101.segment_text",
 })
 IMAGE_TOOLS = frozenset({"observe", "get_job"})
 

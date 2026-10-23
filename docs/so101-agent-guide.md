@@ -22,8 +22,9 @@ joints and tool position from `cap_so101__get_telemetry`.
   `cap_so101__detect_color` give pixel positions, and telemetry gives the URDF tool
   position. Neither camera has depth or extrinsics.
 - For the ball-into-cup task, prefer the reviewed program `cap_program_ball_in_cup`: one
-  call does the whole task. If it stops (for example, the ball is outside the grasp
-  window), observe, then continue with the individual tools following the recipe.
+  call does the whole task and fails if the ball ends visibly outside the mug. If it
+  stops (for example, the ball is outside the grasp window), observe, then continue with
+  the individual tools following the recipe.
 - Call tools one at a time. A refused call wrote nothing; read its message and adjust.
 - Finish by placing any held object, then `cap_so101__go_to` with the rest joints from
   the recipe. Torque stays on when the session ends.

@@ -71,17 +71,15 @@ camera:
 
 The reviewed program [`ball_in_cup.py`](../../../src/cap_harness/so101/programs/ball_in_cup.py)
 (MCP: `cap_program_ball_in_cup`; operator: `scripts/so101_ball_in_cup.sh`) runs this
-recipe as continuous moves at 60°/s. It adds two safeguards learned from its first trial.
-That trial reached the grasp in 17 s but closed without contact. Just before the close,
-the wrist view showed the ball at (378, 312); the two successful closes had it at (439, 307)
-and (417, 303), about 100 px across. The ball was 16–24 mm toward the static jaw, probably
-nudged during the single steep approach, and the fast 50 units/s sweep pushed it under
-the jaws. The program therefore:
+recipe as continuous moves at 60°/s. What its trials taught:
 
-- checks the wrist view before closing and corrects toward (428, 305) ± 12 px, at about
-  2.5 px/mm sideways and 2.7 px/mm along the fingers, up to twice; otherwise it stops
-  with the jaws open;
-- closes at 20 units/s, close to the stepwise closes that worked.
-
-Expected duration, built from measured parts (not yet run end to end): about 34 s, plus
-about 7 s per wrist correction and about 90 s for a calibration run.
+- The first trial reached the grasp in 17 s but closed without contact. Just before the
+  close the wrist view showed the ball at (378, 312); the successful closes had it at
+  (439, 307) and (417, 303), about 100 px across. The program now checks the wrist view
+  against (428, 305) ± 12 px, corrects up to twice (about 2.5 px/mm sideways, 2.7 px/mm
+  along the fingers) or stops with the jaws open, and closes at 20 units/s.
+- A ball about 25 cm from the base put a fixed staging pose out of reach; staging now
+  backs off along the finger axis by the longest reachable standoff (90 to 35 mm).
+- The second trial grasped and lifted the ball but released it on the mug's rim: its
+  placement map came from a held ball, whose pixel is biased (see [SO101](../../../docs/so101.md)).
+  Placement now comes from verified releases.
