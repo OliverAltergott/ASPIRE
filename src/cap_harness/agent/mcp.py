@@ -409,11 +409,11 @@ class CapMcpBridge:
         return self._snapshot(value)
 
 
-def create_mcp_transport(session: LiveAgentSession) -> tuple[Any, Any]:
+def create_mcp_transport(session: LiveAgentSession, bridge: Any = CapMcpBridge) -> tuple[Any, Any]:
     from mcp.server.lowlevel import Server
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
-    bridge = CapMcpBridge(session)
+    bridge = bridge(session)
     server = Server("cap", version="0.1.0")
 
     @server.list_tools()

@@ -13,12 +13,12 @@ from .embedded import EmbeddedAgentRuntime
 from .mcp import create_lifespan, create_mcp_transport
 
 
-def create_app(session: Any) -> Any:
+def create_app(session: Any, bridge: Any = None) -> Any:
     """Serve MCP and operator steering without creating another environment."""
     from fastapi import FastAPI
     from starlette.routing import Mount
 
-    manager, endpoint = create_mcp_transport(session)
+    manager, endpoint = create_mcp_transport(session, *(() if bridge is None else (bridge,)))
     app = FastAPI(lifespan=create_lifespan(manager))
     app.router.routes.append(Mount("/mcp", app=endpoint))
 
