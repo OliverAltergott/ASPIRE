@@ -353,12 +353,13 @@ class SceneHardware(StallingHardware):
         return {name: (np.zeros((480, 640, 3), dtype=np.uint8), time.time()) for name in ("external", "wrist")}
 
 
-def run_skill(calibration=None, wrist_balls=((428, 305),), calibrate=False):
+def run_skill(calibration=None, wrist_balls=((428, 305),), calibrate=False, segmentation=None):
     from pathlib import Path
 
     hw = SceneHardware()
     hw.values["positions"].update(dict(zip(JOINTS, [-5.0, -106.3, 66.7, 97.2, -84.8], strict=True)), gripper=2.0)
-    segmentation = SceneSegmentation(wrist_balls)
+    segmentation = segmentation or SceneSegmentation(wrist_balls)
+    segmentation.hardware = hw
     adapter = So101Adapter(hw, allow_motion=True, sleep=lambda _seconds: None, segmentation_provider=segmentation,
                            speed_deg_s=60.0, overhead_calibration=calibration)
     source = (Path(__file__).parents[1] / "src/cap_harness/so101/programs/ball_in_cup.py").read_text()
@@ -412,10 +413,31 @@ def test_ball_in_cup_skill_refuses_to_close_when_the_ball_stays_off_centre():
 
 
 def test_ball_in_cup_skill_records_overhead_calibration_with_the_held_ball():
-    outcome, hw, _ = run_skill(calibrate=True)
+    from cap_harness.so101.calibration import ball_centre_mm
+
+    camera = np.array([[0.0, -0.75, 400.0], [-0.72, 0.0, 470.0], [0.0, 1.2e-4, 1.0]])  # base mm -> pixel
+    mug_mm = np.array([218.0, 231.0])
+    u, v, w = camera @ [*mug_mm, 1.0]
+
+    class HeldBallCamera(SceneSegmentation):
+        hardware = None
+
+        def segment_text(self, observation, query):
+            if observation.frame.startswith("external") and query == "green ball" and \
+                    self.hardware.values["goals"]["gripper"] < 30:
+                x, y, _ = ball_centre_mm(arm_goals(self.hardware))
+                bu, bv, bw = camera @ [x, y, 1.0]
+                self.centres[("external", "green ball")] = (round(bu / bw), round(bv / bw))
+            return super().segment_text(observation, query)
+
+    segmentation = HeldBallCamera()
+    segmentation.centres[("external", "mug")] = (round(u / w), round(v / w))
+    outcome, hw, _ = run_skill(calibrate=True, segmentation=segmentation)
     assert outcome.ok, outcome.error
     records = outcome.result["calibration_records"]
     assert [r["plane"] for r in records] == ["table"] * 6 + ["rim"] * 6
+    assert outcome.result["mug_map"] == "in-run affine"
+    np.testing.assert_allclose(outcome.result["mug_mm"], mug_mm, atol=6)  # affine vs projective, pixel rounding
     np.testing.assert_allclose(arm_goals(hw), [-5.0, -106.3, 66.7, 97.2, -84.8], atol=1e-6)
 
 
