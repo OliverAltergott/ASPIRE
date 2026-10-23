@@ -23,7 +23,8 @@ SIN, COS = math.sin(math.radians(PITCH)), math.cos(math.radians(PITCH))
 # reliable only near those pixels; the wrist check corrects grasp errors up to 25 mm.
 # RELEASES: verified releases, (mug centre pixel, release tool x, y in mm) at PLACE_Z.
 TABLE = ((370, 228, 219, 101), (386, 292, 276, 7))
-RELEASES = (((346, 354), (237.0, -85.6)), ((384, 146), (249.3, 201.8)), ((382.5, 142), (236.5, 198.5)))
+RELEASES = (((346, 354), (237.0, -85.6)), ((384, 146), (249.3, 201.8)), ((382.5, 142), (236.5, 198.5)),
+            ((365.2, 113.9), (212.7, 236.2)))
 PLACE_Z = 102.0
 # At 38 degrees the jaws' lower edge rises about 0.8 mm per mm behind the tips. With the
 # ball centre 14 mm behind them, the closing jaw pushed the ball deeper and it rolled out

@@ -83,3 +83,10 @@ recipe as continuous moves at 60°/s. What its trials taught:
 - The second trial grasped and lifted the ball but released it on the mug's rim: its
   placement map came from a held ball, whose pixel is biased (see [SO101](../../../docs/so101.md)).
   Placement now comes from verified releases.
+- Grasping 14 mm past the ball centre left the jaws' lower edge only about 5 mm below its
+  equator; the closing jaw rolled the ball toward the palm and out underneath in two of
+  four closes, with wrist views identical to successful ones. The program grasps 8 mm
+  past the centre (wrist target (428, 292)).
+
+The next run completed the task in 46 s wall clock (39 s in the program, of which about
+17 s SAM3): no wrist correction, contact at opening 0.20, and the ball seen inside the mug.
