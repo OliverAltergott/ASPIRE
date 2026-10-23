@@ -1,24 +1,41 @@
-"""Ball-into-cup skill: one CAP program, no agent round trips (see TASK_CONTEXT.md).
+"""Ball-into-cup skill: one CAP program, no agent round trips.
 
-Run it through the SO101 runtime started with --sam3-url, e.g. --program this file.
-It locates the ball and the mug once with SAM3 in the external view, then executes the
-recipe's grasp (38 degree pitch, tool 14 mm past the ball centre at z = 0) and placement
-(ball centre 14 mm behind the tool, released at rim height) as continuous moves.
+See examples/so101/ball_in_cup/TASK_CONTEXT.md. Needs the SO101 runtime with --sam3-url
+(and, once recorded, --overhead-calibration); run it with --program this file, or over
+MCP as cap_program_ball_in_cup. SAM3 locates the ball and the
+mug once in the external view; the recipe's grasp (38 degree pitch, tool 14 mm past the
+ball centre at z = 0) and placement (released at rim height) run as continuous moves.
+Before closing, the wrist view must show the ball where successful closes had it; the
+program corrects up to twice and otherwise stops without closing.
 
-Station data: the pixel-to-millimetre pairs below were measured in earlier runs on this
-station and are reliable only near those pixels; recalibrate after moving the external
-camera or placing objects elsewhere.
+With CALIBRATE_OVERHEAD = True the held ball also visits six poses per plane and the
+result carries "calibration_records"; fit them with
+`python -m cap_harness.so101.calibration result.json overhead.json`.
 """
 
 import math
 
 REST = [-5.0, -106.3, 66.7, 97.2, -84.8]
 PITCH = 38.0
-TABLE = ((370, 228, 219, 101), (386, 292, 276, 7))  # pixel -> mm at ball-centre height
-RIM = ((346, 354, 223, -80), (384, 146, 238, 193))  # pixel -> mm at mug-rim height
+SIN, COS = math.sin(math.radians(PITCH)), math.cos(math.radians(PITCH))
+# Fallback station data when no calibration is loaded: two pixel -> mm pairs per height
+# from earlier runs, reliable only near those pixels.
+TABLE = ((370, 228, 219, 101), (386, 292, 276, 7))
+RIM = ((346, 354, 223, -80), (384, 146, 238, 193))
+# Wrist view (640x480) of the ball just before the two successful closes: centres
+# (439, 307) and (417, 303), about 100 px across, so about 2.5 px/mm sideways; moving
+# along the fingers shifted the ball about 2.7 px/mm vertically.
+WRIST_TARGET, WRIST_TOLERANCE_PX = (428, 305), 12
+LATERAL_PX_PER_MM, ALONG_PX_PER_MM = 2.5, 2.7
+CALIBRATE_OVERHEAD = False
+# Tool poses (z mm, [(radius mm, heading deg)]) for the held ball, at least 100 mm from the mug.
+CALIBRATION_POSES = (
+    ("table", 10.0, ((245, -25), (300, -25), (245, 0), (305, 0), (245, 22), (300, 18))),
+    ("rim", 102.0, ((300, 20), (300, -15), (240, -15), (240, 20), (240, 60), (300, 60))),
+)
 
 
-def to_robot(pairs, pixel):
+def two_point(pairs, pixel):
     # Similarity transform from two pairs; image v points down, so it is negated.
     (u1, v1, x1, y1), (u2, v2, x2, y2) = pairs
     du, dw, dx, dy = u2 - u1, v1 - v2, x2 - x1, y2 - y1
@@ -28,9 +45,11 @@ def to_robot(pairs, pixel):
     return [x1 + real * pu - imag * pw, y1 + imag * pu + real * pw]
 
 
-def detect(query):
-    found = so101.segment_text(query, "external")["external"]
-    return found[0] if found else None
+def to_base(plane, pixel):
+    try:
+        return so101.pixel_to_base(pixel, plane), "calibration"
+    except Exception:
+        return two_point(TABLE if plane == "table" else RIM, pixel), "two-point fallback"
 
 
 def tool_for(xy, z, offset_mm=14.0):
@@ -44,17 +63,48 @@ def check(step, outcome):
     return outcome
 
 
+def tool_now():
+    return so101.get_telemetry()["urdf_model"]["goal_tool_xyz_mm"]
+
+
 def move_to(target):
-    here = so101.get_telemetry()["urdf_model"]["goal_tool_xyz_mm"]
+    here = tool_now()
     return so101.move_tool([target[i] - here[i] for i in range(3)])
+
+
+def centre_ball_between_jaws():
+    corrections = []
+    for attempt in range(3):
+        seen = so101.segment_text("green ball", "wrist")["wrist"]
+        if not seen:
+            raise ValueError("The ball is not visible between the jaws; not closing")
+        dx = seen[0]["center_px"][0] - WRIST_TARGET[0]
+        dy = seen[0]["center_px"][1] - WRIST_TARGET[1]
+        if abs(dx) <= WRIST_TOLERANCE_PX and abs(dy) <= WRIST_TOLERANCE_PX:
+            return corrections
+        if attempt == 2:
+            raise ValueError(f"The ball stayed {dx:.0f}, {dy:.0f} px from the grasp window; not closing")
+        lateral = max(-25.0, min(25.0, dx / LATERAL_PX_PER_MM))  # + is image right: clockwise
+        along = max(-20.0, min(20.0, -dy / ALONG_PX_PER_MM))  # + is further along the fingers
+        here = tool_now()
+        heading = math.atan2(here[1], here[0])
+        corrections.append([round(lateral, 1), round(along, 1)])
+        check("lift", so101.move_tool([0, 0, 8]))
+        check("centre", so101.move_tool([lateral * math.sin(heading) + along * COS * math.cos(heading),
+                                         -lateral * math.cos(heading) + along * COS * math.sin(heading),
+                                         -along * SIN]))
+        check("lower", so101.move_tool([0, 0, -8]))
+    return corrections
 
 
 obs = get_observation()
 check("enable", so101.enable())
-ball_px, mug_px = detect("green ball"), detect("mug")
-if ball_px is None or mug_px is None:
-    raise ValueError(f"SAM3 did not find both objects: ball={ball_px}, mug={mug_px}")
-ball, mug = to_robot(TABLE, ball_px["center_px"]), to_robot(RIM, mug_px["center_px"])
+seen = so101.segment_text(["green ball", "mug"], "external")
+ball_seen, mug_seen = seen["green ball"]["external"], seen["mug"]["external"]
+if not ball_seen or not mug_seen:
+    raise ValueError(f"SAM3 did not find both objects: ball={ball_seen}, mug={mug_seen}")
+ball, mapping = to_base("table", ball_seen[0]["center_px"])
+mug = to_base("rim", mug_seen[0]["center_px"])[0]
 
 grasp = tool_for(ball, 0.0)
 heading = math.atan2(grasp[1], grasp[0])
@@ -62,24 +112,41 @@ check("stage", so101.go_to(xyz_mm=[grasp[0] - 70 * math.cos(heading), grasp[1] -
                            pitch=PITCH))
 check("open", set_gripper(0.55))
 check("approach", move_to(grasp))
+corrections = centre_ball_between_jaws()
 contact = check("grasp", so101.close_until_contact(0.1))
 check("lift", so101.move_tool([0, 0, 70]))
 if so101.get_telemetry()["positions"]["gripper"] < 19:
     raise ValueError("The gripper closed further after lifting: the ball was not retained")
 
+records = []
+if CALIBRATE_OVERHEAD:
+    for plane, z, poses in CALIBRATION_POSES:
+        for radius, degrees in poses:
+            check("calibrate", move_to([radius * math.cos(math.radians(degrees)),
+                                        radius * math.sin(math.radians(degrees)), z]))
+            held = so101.segment_text("green ball", "external")["external"]
+            if held:
+                positions = so101.get_telemetry()["positions"]
+                records.append({"plane": plane, "pixel": held[0]["center_px"],
+                                "joints_deg": [positions[j] for j in
+                                               ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")]})
+    here = tool_now()
+    check("clear", move_to([here[0], here[1], 130.0]))
+
 place = tool_for(mug, 102.0)
-lifted = so101.get_telemetry()["urdf_model"]["goal_tool_xyz_mm"]
-check("carry", move_to([(lifted[0] + place[0]) / 2, (lifted[1] + place[1]) / 2, 130.0]))
+here = tool_now()
+check("carry", move_to([(here[0] + place[0]) / 2, (here[1] + place[1]) / 2, 130.0]))
 check("carry", move_to([place[0], place[1], 130.0]))
 check("lower", move_to(place))
 check("release", set_gripper(0.48))
 check("retreat", so101.move_tool([0, 0, 30]))
 check("rest", so101.go_to(joints_deg=REST))
 
-after = detect("green ball")
-x0, y0, x1, y1 = mug_px["box_xyxy"]
-inside = after is not None and x0 <= after["center_px"][0] <= x1 and y0 <= after["center_px"][1] <= y1
-result = {"ball_mm": [round(v) for v in ball], "mug_mm": [round(v) for v in mug],
-          "contact_opening": contact.diagnostics["opening"],
-          "ball_after_px": None if after is None else after["center_px"], "ball_in_mug_box": inside}
-print(result)
+after = so101.segment_text(["green ball", "mug"], "external")
+ball_after, mug_after = after["green ball"]["external"], after["mug"]["external"] or mug_seen
+x0, y0, x1, y1 = mug_after[0]["box_xyxy"]
+inside = bool(ball_after) and x0 <= ball_after[0]["center_px"][0] <= x1 and y0 <= ball_after[0]["center_px"][1] <= y1
+result = {"map": mapping, "ball_mm": [round(v) for v in ball], "mug_mm": [round(v) for v in mug],
+          "wrist_corrections_mm": corrections, "contact_opening": contact.diagnostics["opening"],
+          "ball_in_mug_box": inside, "calibration_records": records}
+print({key: value for key, value in result.items() if key != "calibration_records"})

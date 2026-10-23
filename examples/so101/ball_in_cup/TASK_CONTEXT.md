@@ -67,13 +67,21 @@ camera:
    hides it. Return with `so101.go_to(joints_deg=[-5, -106.3, 66.7, 97.2, -84.8])`;
    `shoulder_lift` must stay above its limit of about −107°.
 
-## Fast skill (in progress)
+## Fast skill
 
-[`skill.py`](skill.py) runs the whole task as one CAP program: SAM3 locates the ball and
-the mug once in the external view, two-point pixel-to-millimetre pairs per height map them
-to the base frame, and the grasp and placement above run as continuous moves at 60°/s.
-Its first trial reached the grasp in 17 s (10.4 s of it SAM3) but closed without contact:
-the ball sat deep between the jaws near the palm, the failure mode described above, so
-the open-loop estimate was off by roughly 1 cm. Before relying on it, add a wrist-camera
-check before closing (successful closes had the ball near wrist pixel (435, 312) with a
-radius of 50–68 px) and replace the two-point maps with a calibration from more points.
+The reviewed program [`ball_in_cup.py`](../../../src/cap_harness/so101/programs/ball_in_cup.py)
+(MCP: `cap_program_ball_in_cup`; operator: `scripts/so101_ball_in_cup.sh`) runs this
+recipe as continuous moves at 60°/s. It adds two safeguards learned from its first trial.
+That trial reached the grasp in 17 s but closed without contact. Just before the close,
+the wrist view showed the ball at (378, 312); the two successful closes had it at (439, 307)
+and (417, 303), about 100 px across. The ball was 16–24 mm toward the static jaw, probably
+nudged during the single steep approach, and the fast 50 units/s sweep pushed it under
+the jaws. The program therefore:
+
+- checks the wrist view before closing and corrects toward (428, 305) ± 12 px, at about
+  2.5 px/mm sideways and 2.7 px/mm along the fingers, up to twice; otherwise it stops
+  with the jaws open;
+- closes at 20 units/s, close to the stepwise closes that worked.
+
+Expected duration, built from measured parts (not yet run end to end): about 34 s, plus
+about 7 s per wrist correction and about 90 s for a calibration run.

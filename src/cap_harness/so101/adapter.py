@@ -24,6 +24,7 @@ from cap_harness.contracts import (
 from cap_harness.errors import ApiError, ErrorCode
 from cap_harness.registry import ToolRegistry
 
+from .calibration import pixel_to_plane
 from .kinematics import pitch_deg, plan_joint_path, plan_tool_path, solve_tool_pose, tool_xyz_mm
 
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
@@ -31,7 +32,7 @@ MOTORS = (*JOINTS, "gripper")
 PUBLIC_EXTENSIONS = frozenset({
     "so101.enable", "so101.move_delta", "so101.get_telemetry",
     "so101.move_tool", "so101.go_to", "so101.close_until_contact", "so101.detect_color",
-    "so101.segment_text",
+    "so101.segment_text", "so101.pixel_to_base",
 })
 # Seeds for absolute tool targets: reach-forward configurations at shallow and steep pitch.
 IK_SEEDS_DEG = ((0, -73, 85, 26), (0, -20, 75, -17), (0, 0, 40, 0), (0, -40, 20, 70))
@@ -54,8 +55,10 @@ class So101Adapter:
     arms = ("primary",)
 
     def __init__(self, hardware, *, allow_motion=False, sleep=time.sleep, event_sink=None,
-                 table_floor_mm=-8.0, segmentation_provider=None, speed_deg_s=20.0, gripper_speed=50.0):
+                 table_floor_mm=-8.0, segmentation_provider=None, speed_deg_s=20.0, gripper_speed=50.0,
+                 overhead_calibration=None):
         self.hardware = hardware
+        self.overhead_calibration = overhead_calibration
         self.allow_motion = allow_motion
         self.speed_deg_s = speed_deg_s
         self.gripper_speed = gripper_speed
@@ -184,7 +187,7 @@ class So101Adapter:
         return [{"gripper": self._goals["gripper"] + (target - self._goals["gripper"]) * i / count}
                 for i in range(1, count + 1)]
 
-    def _move(self, path):
+    def _move(self, path, *, gripper_speed=None):
         """Stream goals through waypoints (dicts of motor targets) in one continuous motion.
 
         Every waypoint is checked before the first write: calibrated limits, at most 5 degrees
@@ -217,8 +220,8 @@ class So101Adapter:
             peak = 0.0
             for changes in path:
                 start = {j: self._goals[j] for j in changes}
-                duration = max(abs(changes[j] - start[j]) / (self.gripper_speed if j == "gripper" else self.speed_deg_s)
-                               for j in changes)
+                duration = max(abs(changes[j] - start[j]) / (
+                    (gripper_speed or self.gripper_speed) if j == "gripper" else self.speed_deg_s) for j in changes)
                 count = max(1, math.ceil(duration * TICK_HZ))
                 for i in range(1, count + 1):
                     tick = time.perf_counter()
@@ -355,8 +358,11 @@ class So101Adapter:
                                    "target_joints_deg": np.round(target, 1).tolist(),
                                    "target_tool_xyz_mm": tool_xyz_mm(target).round(1).tolist()})
 
-    def close_until_contact(self, min_opening: float = 0.1, ease: float = 0.025):
-        """Close in bounded steps until the jaws stall on an object or reach min_opening.
+    def close_until_contact(self, min_opening: float = 0.1, ease: float = 0.025, speed: float = 20.0):
+        """Close at `speed` (units per second) until the jaws stall on an object or reach min_opening.
+
+        A fast sweep can knock a light ball out from between the jaws; 20 units/s matched
+        the stepwise closes that grasped it.
 
         A stall more than 2 units above the commanded step is contact; the goal is then
         eased to `ease` below the stalled opening to limit squeeze. ok=False with
@@ -371,7 +377,7 @@ class So101Adapter:
             target = min_opening * 100
             if target >= self._goals["gripper"]:
                 return self._failure(ValueError("Gripper is already closed beyond min_opening"))
-            result = self._move(self._gripper_path(target))
+            result = self._move(self._gripper_path(target), gripper_speed=speed)
             if result.ok:
                 return ExecutionResult(
                     ok=False, steps_executed=result.steps_executed, final_observation=result.final_observation,
@@ -422,33 +428,47 @@ class So101Adapter:
             blobs[name] = sorted(found, key=lambda blob: blob["area_px"], reverse=True)[:5]
         return blobs
 
-    def segment_text(self, query: str, camera_names=None, min_score: float = 0.3):
+    def segment_text(self, query, camera_names=None, min_score: float = 0.3):
         """Text-prompted 2D detection (SAM3) in a fresh observation of each camera.
 
         Returns {camera: [{"score", "box_xyxy", "center_px", "area_px"}]}, best first and at
         most three per camera; center_px is the mask centroid. RGB only: no depth or 3D.
+        A list of queries returns {query: {camera: [...]}} from one observation; the SAM3
+        service encodes each image once, so extra queries cost under a second.
         """
         observation = self.get_observation()
         names = observation.cameras if camera_names is None else (
             (camera_names,) if isinstance(camera_names, str) else tuple(camera_names))
-        detections = {}
+        queries = [query] if isinstance(query, str) else list(query)
+        found = {q: {} for q in queries}
         for name in names:
-            result = self.segmentation_provider.segment_text(observation.cameras[name], query)
-            if not result.ok:
-                if result.error.code != ErrorCode.NO_SEGMENTATION:
-                    raise RuntimeError(f"{name}: {result.error.message}")
-                detections[name] = []
-                continue
-            found = []
-            for segmentation in result.segmentations:
-                rows, cols = np.nonzero(segmentation.mask)
-                if segmentation.score >= min_score and rows.size:
-                    found.append({"score": round(float(segmentation.score), 3),
-                                  "box_xyxy": np.round(segmentation.box_xyxy, 1).tolist(),
-                                  "center_px": [round(float(cols.mean()), 1), round(float(rows.mean()), 1)],
-                                  "area_px": int(rows.size)})
-            detections[name] = found[:3]
-        return detections
+            for q in queries:
+                found[q][name] = self._detections(observation.cameras[name], q, min_score)
+        return found[query] if isinstance(query, str) else found
+
+    def _detections(self, camera, query, min_score):
+        result = self.segmentation_provider.segment_text(camera, query)
+        if not result.ok:
+            if result.error.code != ErrorCode.NO_SEGMENTATION:
+                raise RuntimeError(f"{camera.frame}: {result.error.message}")
+            return []
+        found = []
+        for segmentation in result.segmentations:
+            rows, cols = np.nonzero(segmentation.mask)
+            if segmentation.score >= min_score and rows.size:
+                found.append({"score": round(float(segmentation.score), 3),
+                              "box_xyxy": np.round(segmentation.box_xyxy, 1).tolist(),
+                              "center_px": [round(float(cols.mean()), 1), round(float(rows.mean()), 1)],
+                              "area_px": int(rows.size)})
+        return found[:3]
+
+    def pixel_to_base(self, pixel, plane: str = "table"):
+        """External-camera pixel to so101_base [x, y] mm on a calibrated plane.
+
+        "table" is a ball resting on the table; "rim" is a ball held at mug-rim height.
+        """
+        calibration = self.overhead_calibration["planes"][plane]
+        return [round(value, 1) for value in pixel_to_plane(calibration["homography"], pixel)]
 
     def register_tools(self):
         registry = ToolRegistry(public_extension_allowlist=PUBLIC_EXTENSIONS)
@@ -461,6 +481,7 @@ class So101Adapter:
             "so101.close_until_contact": self.close_until_contact,
             "so101.detect_color": self.detect_color,
             **({"so101.segment_text": self.segment_text} if self.segmentation_provider is not None else {}),
+            **({"so101.pixel_to_base": self.pixel_to_base} if self.overhead_calibration is not None else {}),
         }.items():
             registry.register(function, name=name, layer="so101", capability="joint-space-rgb", public=True)
         return registry

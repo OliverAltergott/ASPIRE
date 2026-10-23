@@ -200,6 +200,7 @@ testpaths = ["tests"]
 extend-exclude = [
   "examples",
   "src/cap_harness/agent/programs",
+  "src/cap_harness/so101/programs/ball_in_cup.py",
   "third_party",
   ".claude/skills/iterative-debugging/scripts/scene_snapshot.py",
 ]
