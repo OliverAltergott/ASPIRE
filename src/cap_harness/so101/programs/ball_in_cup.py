@@ -99,6 +99,7 @@ def centre_ball_between_jaws():
 
 obs = get_observation()
 check("enable", so101.enable())
+check("rest", so101.go_to(joints_deg=REST))  # A clear external view; near-instant when already at rest.
 seen = so101.segment_text(["green ball", "mug"], "external")
 ball_seen, mug_seen = seen["green ball"]["external"], seen["mug"]["external"]
 if not ball_seen or not mug_seen:
