@@ -103,6 +103,19 @@ def move_to(target):
     return so101.move_tool([target[i] - here[i] for i in range(3)])
 
 
+def stage_behind(grasp):
+    # Furthest reachable standoff along the finger axis, so the approach slides along the fingers.
+    heading = math.atan2(grasp[1], grasp[0])
+    for back in (90, 75, 60, 45, 35):
+        staged = so101.go_to(xyz_mm=[grasp[0] - back * COS * math.cos(heading),
+                                     grasp[1] - back * COS * math.sin(heading), grasp[2] + back * SIN], pitch=PITCH)
+        if staged.ok:
+            return back
+        if "unreachable" not in str(staged.error):
+            raise ValueError(f"stage failed: {staged.error}")
+    raise ValueError("No reachable staging pose behind the ball; it is too close to the base")
+
+
 def centre_ball_between_jaws():
     corrections = []
     for attempt in range(3):
@@ -139,9 +152,7 @@ ball, mapping = to_base("table", ball_seen[0]["center_px"])
 mug, mug_mapping = to_base("rim", mug_seen[0]["center_px"])
 
 grasp = tool_for(ball, 0.0)
-heading = math.atan2(grasp[1], grasp[0])
-check("stage", so101.go_to(xyz_mm=[grasp[0] - 70 * math.cos(heading), grasp[1] - 70 * math.sin(heading), 51.0],
-                           pitch=PITCH))
+standoff = stage_behind(grasp)
 check("open", set_gripper(0.55))
 check("approach", move_to(grasp))
 corrections = centre_ball_between_jaws()
@@ -183,7 +194,7 @@ after = so101.segment_text(["green ball", "mug"], "external")
 ball_after, mug_after = after["green ball"]["external"], after["mug"]["external"] or mug_seen
 x0, y0, x1, y1 = mug_after[0]["box_xyxy"]
 inside = bool(ball_after) and x0 <= ball_after[0]["center_px"][0] <= x1 and y0 <= ball_after[0]["center_px"][1] <= y1
-result = {"map": mapping, "mug_map": mug_mapping, "ball_mm": [round(v) for v in ball], "mug_mm": [round(v) for v in mug],
+result = {"map": mapping, "mug_map": mug_mapping, "standoff_mm": standoff, "ball_mm": [round(v) for v in ball], "mug_mm": [round(v) for v in mug],
           "wrist_corrections_mm": corrections, "contact_opening": contact.diagnostics["opening"],
           "ball_in_mug_box": inside, "calibration_records": records}
 print({key: value for key, value in result.items() if key != "calibration_records"})
