@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import functools
+import hashlib
 import io
 import logging
 from typing import Any
@@ -33,6 +34,9 @@ _PROCESSOR: Any | None = None
 _DEVICE = "cuda"
 _GPU_SEMAPHORE = asyncio.Semaphore(1)
 _MAX_SEGMENTATIONS = 5
+# The last text request's image encoding: several prompts on one image encode it once.
+# Text prompts replace each other in this state; point prompts always start fresh.
+_TEXT_STATE: tuple[str, Any] | None = None
 
 
 class SegmentRequest(BaseModel):
@@ -117,11 +121,14 @@ def _encode_raw(array: np.ndarray) -> str:
     return base64.b64encode(np.ascontiguousarray(array).tobytes()).decode("ascii")
 
 
-def _segment_text(image: Image.Image, prompt: str) -> SegmentResponse:
+def _segment_text(image_base64: str, prompt: str) -> SegmentResponse:
+    global _TEXT_STATE
     device_type = "cuda" if "cuda" in _DEVICE else "cpu"
+    key = hashlib.sha1(image_base64.encode()).hexdigest()
     with torch.autocast(device_type, dtype=torch.bfloat16):
-        state = _PROCESSOR.set_image(image)
-        output = _PROCESSOR.set_text_prompt(state=state, prompt=prompt)
+        if _TEXT_STATE is None or _TEXT_STATE[0] != key:
+            _TEXT_STATE = (key, _PROCESSOR.set_image(_decode_image(image_base64)))
+        output = _PROCESSOR.set_text_prompt(state=_TEXT_STATE[1], prompt=prompt)
 
     masks = output.get("masks")
     boxes = output.get("boxes")
@@ -182,9 +189,7 @@ async def segment(request: SegmentRequest) -> SegmentResponse:
     if _PROCESSOR is None:
         raise HTTPException(status_code=503, detail="Model not initialized")
     try:
-        return await _run_serialized(
-            _segment_text, _decode_image(request.image_base64), request.text_prompt
-        )
+        return await _run_serialized(_segment_text, request.image_base64, request.text_prompt)
     except HTTPException:
         raise
     except Exception as exc:
